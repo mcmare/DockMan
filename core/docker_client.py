@@ -1,10 +1,16 @@
 import docker
+import asyncio
 from docker.errors import DockerException, APIError
 from typing import List, Dict, Any
 import os
 from datetime import datetime
 import iso8601
 import time
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 class DockerClient:
     def __init__(self):
@@ -26,18 +32,21 @@ class DockerClient:
             }
             self._container_stats_cache = {}
             self._cache_duration = 5  # Cache data for 5 seconds
+            logger.debug("DockerClient initialized successfully")
         except DockerException as e:
+            logger.error(f"Failed to connect to Docker: {e}")
             raise Exception(f"Failed to connect to Docker: {e}")
 
-    def get_containers(self, all: bool = True) -> List[Dict[str, Any]]:
+    async def get_containers(self, all: bool = True) -> List[Dict[str, Any]]:
         """Get list of containers with details."""
         current_time = time.time()
         if current_time - self._cache["containers"]["last_update"] < self._cache_duration:
+            logger.debug("Returning cached containers")
             return self._cache["containers"]["data"]
 
         try:
-            containers = self.client.containers.list(all=all)
-            self._update_stats_cache(containers)
+            containers = await asyncio.to_thread(self.client.containers.list, all=all)
+            await self._update_stats_cache(containers)
             self._cache["containers"]["data"] = [
                 {
                     "id": c.id[:12],
@@ -54,15 +63,17 @@ class DockerClient:
                 for c in containers
             ]
             self._cache["containers"]["last_update"] = current_time
+            logger.debug(f"Fetched {len(containers)} containers")
             return self._cache["containers"]["data"]
         except APIError as e:
+            logger.error(f"Error fetching containers: {e}")
             raise Exception(f"Error fetching containers: {e}")
 
-    def _update_stats_cache(self, containers: List) -> None:
+    async def _update_stats_cache(self, containers: List) -> None:
         """Update cached container statistics."""
         for container in containers:
             try:
-                stats = container.stats(stream=False)
+                stats = await asyncio.to_thread(container.stats, stream=False)
                 cpu_delta = (
                     stats["cpu_stats"]["cpu_usage"]["total_usage"]
                     - stats["precpu_stats"]["cpu_usage"]["total_usage"]
@@ -72,7 +83,7 @@ class DockerClient:
                     - stats["precpu_stats"]["system_cpu_usage"]
                 )
                 cpu_percent = (cpu_delta / system_delta * 100) if system_delta > 0 else 0.0
-                memory_usage = stats["memory_stats"]["usage"] / (1024 * 1024)  # Convert to MB
+                memory_usage = stats["memory_stats"]["usage"] / (1024 * 1024)  # MB
                 memory_limit = stats["memory_stats"].get("limit", 1) / (1024 * 1024)
                 memory_percent = (memory_usage / memory_limit * 100) if memory_limit > 0 else 0.0
                 self._container_stats_cache[container.id] = {
@@ -80,7 +91,8 @@ class DockerClient:
                     "memory": round(memory_usage, 2),
                     "memory_percent": round(memory_percent, 2)
                 }
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Failed to fetch stats for container {container.id}: {e}")
                 self._container_stats_cache[container.id] = {
                     "cpu": 0.0,
                     "memory": 0.0,
@@ -108,58 +120,69 @@ class DockerClient:
                 result.append(f"{private_port}")
         return ", ".join(result)
 
-    def start_container(self, container_id: str) -> None:
+    async def start_container(self, container_id: str) -> None:
         """Start a container by ID."""
         try:
-            container = self.client.containers.get(container_id)
-            container.start()
+            container = await asyncio.to_thread(self.client.containers.get, container_id)
+            await asyncio.to_thread(container.start)
             self._cache["containers"]["last_update"] = 0  # Invalidate cache
+            logger.debug(f"Started container {container_id}")
         except APIError as e:
+            logger.error(f"Error starting container {container_id}: {e}")
             raise Exception(f"Error starting container {container_id}: {e}")
 
-    def stop_container(self, container_id: str, timeout: int = 10) -> None:
+    async def stop_container(self, container_id: str, timeout: int = 10) -> None:
         """Stop a container by ID."""
         try:
-            container = self.client.containers.get(container_id)
-            container.stop(timeout=timeout)
+            container = await asyncio.to_thread(self.client.containers.get, container_id)
+            await asyncio.to_thread(container.stop, timeout=timeout)
             self._cache["containers"]["last_update"] = 0  # Invalidate cache
+            logger.debug(f"Stopped container {container_id}")
         except APIError as e:
+            logger.error(f"Error stopping container {container_id}: {e}")
             raise Exception(f"Error stopping container {container_id}: {e}")
 
-    def restart_container(self, container_id: str, timeout: int = 10) -> None:
+    async def restart_container(self, container_id: str, timeout: int = 10) -> None:
         """Restart a container by ID."""
         try:
-            container = self.client.containers.get(container_id)
-            container.restart(timeout=timeout)
+            container = await asyncio.to_thread(self.client.containers.get, container_id)
+            await asyncio.to_thread(container.restart, timeout=timeout)
             self._cache["containers"]["last_update"] = 0  # Invalidate cache
+            logger.debug(f"Restarted container {container_id}")
         except APIError as e:
+            logger.error(f"Error restarting container {container_id}: {e}")
             raise Exception(f"Error restarting container {container_id}: {e}")
 
-    def remove_container(self, container_id: str, force: bool = False) -> None:
+    async def remove_container(self, container_id: str, force: bool = False) -> None:
         """Remove a container by ID."""
         try:
-            container = self.client.containers.get(container_id)
-            container.remove(force=force)
+            container = await asyncio.to_thread(self.client.containers.get, container_id)
+            await asyncio.to_thread(container.remove, force=force)
             self._cache["containers"]["last_update"] = 0  # Invalidate cache
+            logger.debug(f"Removed container {container_id}")
         except APIError as e:
+            logger.error(f"Error removing container {container_id}: {e}")
             raise Exception(f"Error removing container {container_id}: {e}")
 
-    def get_container_logs(self, container_id: str, tail: int = 100) -> str:
+    async def get_container_logs(self, container_id: str, tail: int = 100) -> str:
         """Get logs for a container."""
         try:
-            container = self.client.containers.get(container_id)
-            return container.logs(tail=tail).decode("utf-8")
+            container = await asyncio.to_thread(self.client.containers.get, container_id)
+            logs = await asyncio.to_thread(container.logs, tail=tail)
+            return logs.decode("utf-8")
         except APIError as e:
+            logger.error(f"Error fetching logs for container {container_id}: {e}")
             raise Exception(f"Error fetching logs for container {container_id}: {e}")
 
-    def get_images(self) -> List[Dict[str, Any]]:
+    async def get_images(self) -> List[Dict[str, Any]]:
         """Get list of Docker images."""
         current_time = time.time()
         if current_time - self._cache["images"]["last_update"] < self._cache_duration:
+            logger.debug("Returning cached images")
             return self._cache["images"]["data"]
 
         try:
-            images = self.client.images.list()
+            images = await asyncio.to_thread(self.client.images.list)
             self._cache["images"]["data"] = [
                 {
                     "id": img.id[:12],
@@ -170,26 +193,31 @@ class DockerClient:
                 for img in images
             ]
             self._cache["images"]["last_update"] = current_time
+            logger.debug(f"Fetched {len(images)} images")
             return self._cache["images"]["data"]
         except APIError as e:
+            logger.error(f"Error fetching images: {e}")
             raise Exception(f"Error fetching images: {e}")
 
-    def remove_image(self, image_id: str, force: bool = False) -> None:
+    async def remove_image(self, image_id: str, force: bool = False) -> None:
         """Remove a Docker image by ID."""
         try:
-            self.client.images.remove(image_id, force=force)
+            await asyncio.to_thread(self.client.images.remove, image_id, force=force)
             self._cache["images"]["last_update"] = 0  # Invalidate cache
+            logger.debug(f"Removed image {image_id}")
         except APIError as e:
+            logger.error(f"Error removing image {image_id}: {e}")
             raise Exception(f"Error removing image {image_id}: {e}")
 
-    def get_volumes(self) -> List[Dict[str, Any]]:
+    async def get_volumes(self) -> List[Dict[str, Any]]:
         """Get list of Docker volumes."""
         current_time = time.time()
         if current_time - self._cache["volumes"]["last_update"] < self._cache_duration:
+            logger.debug("Returning cached volumes")
             return self._cache["volumes"]["data"]
 
         try:
-            volumes = self.client.volumes.list()
+            volumes = await asyncio.to_thread(self.client.volumes.list)
             self._cache["volumes"]["data"] = [
                 {
                     "name": vol.name,
@@ -200,27 +228,32 @@ class DockerClient:
                 for vol in volumes
             ]
             self._cache["volumes"]["last_update"] = current_time
+            logger.debug(f"Fetched {len(volumes)} volumes")
             return self._cache["volumes"]["data"]
         except APIError as e:
+            logger.error(f"Error fetching volumes: {e}")
             raise Exception(f"Error fetching volumes: {e}")
 
-    def remove_volume(self, volume_name: str) -> None:
+    async def remove_volume(self, volume_name: str) -> None:
         """Remove a Docker volume by name."""
         try:
-            volume = self.client.volumes.get(volume_name)
-            volume.remove()
+            volume = await asyncio.to_thread(self.client.volumes.get, volume_name)
+            await asyncio.to_thread(volume.remove)
             self._cache["volumes"]["last_update"] = 0  # Invalidate cache
+            logger.debug(f"Removed volume {volume_name}")
         except APIError as e:
+            logger.error(f"Error removing volume {volume_name}: {e}")
             raise Exception(f"Error removing volume {volume_name}: {e}")
 
-    def get_networks(self) -> List[Dict[str, Any]]:
+    async def get_networks(self) -> List[Dict[str, Any]]:
         """Get list of Docker networks."""
         current_time = time.time()
         if current_time - self._cache["networks"]["last_update"] < self._cache_duration:
+            logger.debug("Returning cached networks")
             return self._cache["networks"]["data"]
 
         try:
-            networks = self.client.networks.list()
+            networks = await asyncio.to_thread(self.client.networks.list)
             self._cache["networks"]["data"] = [
                 {
                     "id": net.id[:12],
@@ -231,15 +264,19 @@ class DockerClient:
                 for net in networks
             ]
             self._cache["networks"]["last_update"] = current_time
+            logger.debug(f"Fetched {len(networks)} networks")
             return self._cache["networks"]["data"]
         except APIError as e:
+            logger.error(f"Error fetching networks: {e}")
             raise Exception(f"Error fetching networks: {e}")
 
-    def remove_network(self, network_id: str) -> None:
+    async def remove_network(self, network_id: str) -> None:
         """Remove a Docker network by ID."""
         try:
-            network = self.client.networks.get(network_id)
-            network.remove()
+            network = await asyncio.to_thread(self.client.networks.get, network_id)
+            await asyncio.to_thread(network.remove)
             self._cache["networks"]["last_update"] = 0  # Invalidate cache
+            logger.debug(f"Removed network {network_id}")
         except APIError as e:
+            logger.error(f"Error removing network {network_id}: {e}")
             raise Exception(f"Error removing network {network_id}: {e}")
